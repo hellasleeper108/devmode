@@ -1,0 +1,28 @@
+# Managed by dev-bootstrap
+add_newline = false
+palette = "TwoDark"
+
+[character]
+success_symbol = "[❯](fg:accent)"
+error_symbol = "[✖](fg:accent)"
+
+[git_branch]
+symbol = " "
+style = "fg:prompt_fg"
+
+[git_status]
+modified = "✎"
+staged = "●"
+untracked = "…"
+style = "fg:prompt_dim"
+
+# TwoDark palette inspired by the classic theme with graceful gray fallback
+[palettes.TwoDark]
+prompt_fg = "#dcdfe4"
+prompt_dim = "#5a5d62"
+accent = "#61afef"
+
+[palettes.fallback]
+prompt_fg = "gray"
+prompt_dim = "dark_gray"
+accent = "gray"
