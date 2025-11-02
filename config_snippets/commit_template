@@ -1,0 +1,21 @@
+# <type>: <subject> (Max 50 characters)
+
+# <body> (Wrap at 72 characters)
+
+# <footer>
+
+# Type can be:
+#   feat:     A new feature
+#   fix:      A bug fix
+#   docs:     Documentation only changes
+#   style:    Changes that don't affect code meaning (formatting, etc)
+#   refactor: Code change that neither fixes a bug nor adds a feature
+#   perf:     Performance improvement
+#   test:     Adding or correcting tests
+#   chore:    Changes to build process or auxiliary tools
+#
+# Subject should use imperative mood: "add feature" not "added feature"
+#
+# Body should explain what and why vs. how
+#
+# Footer should reference issues: Fixes #123, Closes #456
