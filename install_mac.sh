@@ -181,11 +181,20 @@ install_brew_packages() {
     direnv
     starship
     asdf
+    jq
+    yq
+    httpie
+    neovim
   )
 
   local optional_packages=(
     lazygit
     git-delta
+    kubectl
+    k9s
+    colima
+    docker
+    docker-compose
   )
 
   log_step "Updating Homebrew 🍺"
@@ -245,15 +254,57 @@ ensure_local_bin() {
   log_success "Ensured ${dir} exists"
 }
 
+ensure_asdf_plugins() {
+  if ! command -v asdf >/dev/null 2>&1; then
+    log_warn "asdf not available; skipping plugin installation"
+    return
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "[dry-run] Would install asdf plugins (nodejs, python, golang, rust)"
+    return
+  fi
+
+  local plugins=(
+    "nodejs:https://github.com/asdf-vm/asdf-nodejs.git"
+    "python:https://github.com/asdf-community/asdf-python.git"
+    "golang:https://github.com/asdf-community/asdf-golang.git"
+    "rust:https://github.com/asdf-community/asdf-rust.git"
+  )
+
+  log_step "Installing asdf language plugins"
+  for entry in "${plugins[@]}"; do
+    local plugin_name="${entry%%:*}"
+    local plugin_url="${entry#*:}"
+
+    if asdf plugin list | grep -q "^${plugin_name}$"; then
+      log_success "asdf plugin ${plugin_name} already installed"
+    else
+      if asdf plugin add "$plugin_name" "$plugin_url" 2>/dev/null; then
+        log_success "Installed asdf plugin: ${plugin_name}"
+      else
+        log_warn "Failed to install asdf plugin ${plugin_name}; continuing"
+      fi
+    fi
+  done
+}
+
 ensure_asdf_templates() {
   local template_dir="$HOME/.config/dev-bootstrap/templates"
   local tool_versions_dest="${template_dir}/.tool-versions"
   local envrc_dest="${template_dir}/.envrc"
   local tool_versions_content="# Managed by dev-bootstrap
 # Populate language versions with \`asdf install\`
+# Example language versions (uncomment to use):
+# nodejs 22.11.0
+# python 3.12.7
+# golang 1.23.3
+# rust 1.82.0
 "
   local envrc_content="use asdf
 export NODE_OPTIONS=--max-old-space-size=8192
+export GOPATH=\$HOME/go
+export PATH=\$GOPATH/bin:\$PATH
 "
 
   write_file_if_diff "$tool_versions_dest" "$tool_versions_content"
@@ -285,6 +336,94 @@ run_direnv_allow() {
   log_success "direnv allow applied in ${HOME}"
 }
 
+configure_neovim() {
+  if ! command -v nvim >/dev/null 2>&1; then
+    log_warn "neovim not installed; skipping nvim configuration"
+    return
+  fi
+
+  log_step "Configuring neovim"
+  local nvim_config_dir="$HOME/.config/nvim"
+
+  if [[ -f "${CONFIG_DIR}/init.vim" ]]; then
+    sync_config_file "${CONFIG_DIR}/init.vim" "${nvim_config_dir}/init.vim"
+  fi
+}
+
+configure_git() {
+  log_step "Configuring git"
+
+  # Sync gitconfig template
+  if [[ -f "${CONFIG_DIR}/gitconfig" ]]; then
+    local gitconfig_local="$HOME/.gitconfig.devmode"
+    sync_config_file "${CONFIG_DIR}/gitconfig" "$gitconfig_local"
+
+    # Add include directive if not present
+    if [[ -f "$HOME/.gitconfig" ]] && ! grep -q "path = ~/.gitconfig.devmode" "$HOME/.gitconfig"; then
+      if [[ "$DRY_RUN" -eq 0 ]]; then
+        printf "\n[include]\n\tpath = ~/.gitconfig.devmode\n" >> "$HOME/.gitconfig"
+        log_success "Added devmode gitconfig include to ~/.gitconfig"
+      fi
+    elif [[ ! -f "$HOME/.gitconfig" ]]; then
+      if [[ "$DRY_RUN" -eq 0 ]]; then
+        printf "[include]\n\tpath = ~/.gitconfig.devmode\n" > "$HOME/.gitconfig"
+        log_success "Created ~/.gitconfig with devmode include"
+      fi
+    fi
+  fi
+
+  # Sync global gitignore
+  sync_config_file "${CONFIG_DIR}/gitignore_global" "$HOME/.gitignore_global"
+  if command -v git >/dev/null 2>&1 && [[ "$DRY_RUN" -eq 0 ]]; then
+    git config --global core.excludesfile "$HOME/.gitignore_global"
+  fi
+
+  # Sync commit template
+  sync_config_file "${CONFIG_DIR}/commit_template" "$HOME/.gitmessage"
+  if command -v git >/dev/null 2>&1 && [[ "$DRY_RUN" -eq 0 ]]; then
+    git config --global commit.template "$HOME/.gitmessage"
+  fi
+}
+
+configure_macos_tweaks() {
+  log_step "Applying macOS-specific optimizations"
+
+  # Add macOS-specific aliases and settings
+  local macos_snippet
+  macos_snippet=$(cat <<'MACOS'
+# macOS-specific settings
+
+# Homebrew
+if [[ -x "/opt/homebrew/bin/brew" ]]; then
+  eval "$(/opt/homebrew/bin/brew shellenv)"
+elif [[ -x "/usr/local/bin/brew" ]]; then
+  eval "$(/usr/local/bin/brew shellenv)"
+fi
+
+# macOS helpers
+alias show_hidden="defaults write com.apple.finder AppleShowAllFiles YES && killall Finder"
+alias hide_hidden="defaults write com.apple.finder AppleShowAllFiles NO && killall Finder"
+alias cleanup_ds="find . -type f -name '*.DS_Store' -ls -delete"
+
+# Better ls colors for macOS
+export CLICOLOR=1
+export LSCOLORS=ExGxBxDxCxEgEdxbxgxcxd
+
+# Increase file descriptor limit
+ulimit -n 10240
+
+# Fix locale issues
+export LC_ALL=en_US.UTF-8
+export LANG=en_US.UTF-8
+MACOS
+)
+
+  ensure_shell_snippet "$HOME/.bashrc" "macos-tweaks" "$macos_snippet"
+  ensure_shell_snippet "$HOME/.zshrc" "macos-tweaks" "$macos_snippet"
+
+  log_success "macOS optimizations applied"
+}
+
 configure_shells() {
   local bash_rc="$HOME/.bashrc"
   local zsh_rc="$HOME/.zshrc"
@@ -303,6 +442,11 @@ alias ll='eza -l --git'
 alias cat='bat'
 alias grep='rg'
 alias find='fd'
+alias vim='nvim'
+alias v='nvim'
+if [ -f "$HOME/.config/dev-bootstrap/shell_functions.sh" ]; then
+  source "$HOME/.config/dev-bootstrap/shell_functions.sh"
+fi
 if command -v fzf >/dev/null 2>&1; then
   eval "$(fzf --bash || true)"
 fi
@@ -344,6 +488,11 @@ alias ll='eza -l --git'
 alias cat='bat'
 alias grep='rg'
 alias find='fd'
+alias vim='nvim'
+alias v='nvim'
+if [[ -f "$HOME/.config/dev-bootstrap/shell_functions.sh" ]]; then
+  source "$HOME/.config/dev-bootstrap/shell_functions.sh"
+fi
 if command -v fzf >/dev/null 2>&1; then
   eval "$(fzf --zsh || true)"
 fi
@@ -389,6 +538,12 @@ print_versions() {
     asdf
     lazygit
     delta
+    jq
+    yq
+    http
+    nvim
+    kubectl
+    k9s
   )
   log_step "Verifying tool versions"
   for tool in "${tools[@]}"; do
@@ -439,10 +594,15 @@ ensure_brew_shellenv
 install_brew_packages
 configure_fzf_keybindings
 ensure_local_bin
+configure_neovim
+configure_git
+configure_macos_tweaks
 configure_shells
+sync_config_file "${CONFIG_DIR}/shell_functions.sh" "$HOME/.config/dev-bootstrap/shell_functions.sh"
 sync_config_file "${CONFIG_DIR}/inputrc" "$HOME/.inputrc"
 sync_config_file "${CONFIG_DIR}/tmux.conf" "$HOME/.tmux.conf"
 sync_config_file "${CONFIG_DIR}/starship.toml" "$HOME/.config/starship.toml"
+ensure_asdf_plugins
 ensure_asdf_templates
 run_direnv_allow
 print_versions

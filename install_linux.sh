@@ -10,6 +10,9 @@ DISTRO_LIKE=""
 PKG_MANAGER=""
 STARSHIP_VERSION="1.23.0"
 LAZYGIT_VERSION="0.44.0"
+YQ_VERSION="4.44.3"
+KUBECTL_VERSION="1.31.1"
+K9S_VERSION="0.32.7"
 
 print_usage() {
   cat <<'USAGE'
@@ -175,9 +178,15 @@ install_packages_apt() {
     zoxide
     direnv
     curl
+    jq
+    httpie
+    neovim
+    python3-pip
   )
   local optional=(
     git-delta
+    docker.io
+    docker-compose
   )
 
   log_step "Updating apt package metadata"
@@ -209,6 +218,17 @@ install_packages_pacman() {
     lazygit
     git-delta
     curl
+    jq
+    httpie
+    neovim
+    python-pip
+  )
+
+  local optional=(
+    docker
+    docker-compose
+    kubectl
+    k9s
   )
 
   log_step "Synchronizing pacman package database"
@@ -216,6 +236,13 @@ install_packages_pacman() {
 
   log_step "Installing toolchain via pacman"
   run_cmd sudo pacman -S --needed --noconfirm "${packages[@]}"
+
+  log_step "Installing optional tools via pacman"
+  for pkg in "${optional[@]}"; do
+    if ! run_cmd sudo pacman -S --needed --noconfirm "$pkg"; then
+      log_warn "Failed to install optional package ${pkg}; continuing"
+    fi
+  done
 }
 
 ensure_local_bin() {
@@ -345,6 +372,110 @@ ensure_lazygit_binary() {
   log_success "Installed lazygit ${LAZYGIT_VERSION}"
 }
 
+ensure_yq_binary() {
+  if command -v yq >/dev/null 2>&1; then
+    return
+  fi
+  local arch=""
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    armv7l|armv7) arch="arm" ;;
+    *)
+      log_warn "Unsupported architecture $(uname -m) for yq install; skipping"
+      return
+      ;;
+  esac
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "[dry-run] Would install yq ${YQ_VERSION} (${arch}) to ${HOME}/.local/bin/yq"
+    return
+  fi
+  log_step "Installing yq (${YQ_VERSION})"
+  local tmp
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  local base="https://github.com/mikefarah/yq/releases/download/v${YQ_VERSION}"
+  local binary="yq_linux_${arch}"
+  local bin_path="${tmp}/${binary}"
+
+  curl -fsSLo "$bin_path" "${base}/${binary}"
+  curl -fsSLo "${bin_path}.tar.gz.sha256" "${base}/checksums_hashes_order"
+
+  install -Dm755 "$bin_path" "$HOME/.local/bin/yq"
+  trap - RETURN
+  rm -rf "$tmp"
+  log_success "Installed yq ${YQ_VERSION}"
+}
+
+ensure_kubectl_binary() {
+  if command -v kubectl >/dev/null 2>&1; then
+    return
+  fi
+  local arch=""
+  case "$(uname -m)" in
+    x86_64|amd64) arch="amd64" ;;
+    aarch64|arm64) arch="arm64" ;;
+    *)
+      log_warn "Unsupported architecture $(uname -m) for kubectl install; skipping"
+      return
+      ;;
+  esac
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "[dry-run] Would install kubectl ${KUBECTL_VERSION} (${arch}) to ${HOME}/.local/bin/kubectl"
+    return
+  fi
+  log_step "Installing kubectl (${KUBECTL_VERSION})"
+  local tmp
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  local base="https://dl.k8s.io/release/v${KUBECTL_VERSION}/bin/linux"
+  local bin_path="${tmp}/kubectl"
+
+  curl -fsSLo "$bin_path" "${base}/${arch}/kubectl"
+  curl -fsSLo "${bin_path}.sha256" "${base}/${arch}/kubectl.sha256"
+
+  printf '%s  kubectl\n' "$(cat "${bin_path}.sha256")" > "${tmp}/checksum"
+  (cd "$tmp" && sha256sum --check checksum)
+
+  install -Dm755 "$bin_path" "$HOME/.local/bin/kubectl"
+  trap - RETURN
+  rm -rf "$tmp"
+  log_success "Installed kubectl ${KUBECTL_VERSION}"
+}
+
+ensure_k9s_binary() {
+  if command -v k9s >/dev/null 2>&1; then
+    return
+  fi
+  local archive_suffix=""
+  case "$(uname -m)" in
+    x86_64|amd64) archive_suffix="Linux_amd64" ;;
+    aarch64|arm64) archive_suffix="Linux_arm64" ;;
+    *)
+      log_warn "Unsupported architecture $(uname -m) for k9s install; skipping"
+      return
+      ;;
+  esac
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "[dry-run] Would install k9s ${K9S_VERSION} (${archive_suffix}) to ${HOME}/.local/bin/k9s"
+    return
+  fi
+  log_step "Installing k9s (${K9S_VERSION})"
+  local tmp
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' RETURN
+  local base="https://github.com/derailed/k9s/releases/download/v${K9S_VERSION}"
+  local tarball="k9s_${archive_suffix}.tar.gz"
+  local tar_path="${tmp}/${tarball}"
+
+  curl -fsSLo "$tar_path" "${base}/${tarball}"
+  tar -xzf "$tar_path" -C "$tmp" k9s
+  install -Dm755 "${tmp}/k9s" "$HOME/.local/bin/k9s"
+  trap - RETURN
+  rm -rf "$tmp"
+  log_success "Installed k9s ${K9S_VERSION}"
+}
+
 ensure_asdf() {
   local asdf_dir="$HOME/.asdf"
   local asdf_version="v0.14.0"
@@ -368,15 +499,63 @@ ensure_asdf() {
   run_cmd git clone https://github.com/asdf-vm/asdf.git "$asdf_dir" --branch "$asdf_version"
 }
 
+ensure_asdf_plugins() {
+  if [[ ! -d "$HOME/.asdf" ]]; then
+    log_warn "asdf not installed; skipping plugin installation"
+    return
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    log_info "[dry-run] Would install asdf plugins (nodejs, python, golang, rust)"
+    return
+  fi
+
+  local plugins=(
+    "nodejs:https://github.com/asdf-vm/asdf-nodejs.git"
+    "python:https://github.com/asdf-community/asdf-python.git"
+    "golang:https://github.com/asdf-community/asdf-golang.git"
+    "rust:https://github.com/asdf-community/asdf-rust.git"
+  )
+
+  # Source asdf to make it available
+  if [[ -f "$HOME/.asdf/asdf.sh" ]]; then
+    # shellcheck disable=SC1091
+    source "$HOME/.asdf/asdf.sh"
+  fi
+
+  log_step "Installing asdf language plugins"
+  for entry in "${plugins[@]}"; do
+    local plugin_name="${entry%%:*}"
+    local plugin_url="${entry#*:}"
+
+    if asdf plugin list | grep -q "^${plugin_name}$"; then
+      log_success "asdf plugin ${plugin_name} already installed"
+    else
+      if asdf plugin add "$plugin_name" "$plugin_url" 2>/dev/null; then
+        log_success "Installed asdf plugin: ${plugin_name}"
+      else
+        log_warn "Failed to install asdf plugin ${plugin_name}; continuing"
+      fi
+    fi
+  done
+}
+
 ensure_asdf_templates() {
   local template_dir="$HOME/.config/dev-bootstrap/templates"
   local tool_versions_dest="${template_dir}/.tool-versions"
   local envrc_dest="${template_dir}/.envrc"
   local tool_versions_content="# Managed by dev-bootstrap
 # Populate language versions with \`asdf install\`
+# Example language versions (uncomment to use):
+# nodejs 22.11.0
+# python 3.12.7
+# golang 1.23.3
+# rust 1.82.0
 "
   local envrc_content="use asdf
 export NODE_OPTIONS=--max-old-space-size=8192
+export GOPATH=\$HOME/go
+export PATH=\$GOPATH/bin:\$PATH
 "
 
   write_file_if_diff "$tool_versions_dest" "$tool_versions_content"
@@ -408,6 +587,87 @@ run_direnv_allow() {
   log_success "direnv allow applied in ${HOME}"
 }
 
+configure_neovim() {
+  if ! command -v nvim >/dev/null 2>&1; then
+    log_warn "neovim not installed; skipping nvim configuration"
+    return
+  fi
+
+  log_step "Configuring neovim"
+  local nvim_config_dir="$HOME/.config/nvim"
+
+  if [[ -f "${CONFIG_DIR}/init.vim" ]]; then
+    sync_config_file "${CONFIG_DIR}/init.vim" "${nvim_config_dir}/init.vim"
+  fi
+}
+
+configure_git() {
+  log_step "Configuring git"
+
+  # Sync gitconfig template
+  if [[ -f "${CONFIG_DIR}/gitconfig" ]]; then
+    local gitconfig_local="$HOME/.gitconfig.devmode"
+    sync_config_file "${CONFIG_DIR}/gitconfig" "$gitconfig_local"
+
+    # Add include directive if not present
+    if [[ -f "$HOME/.gitconfig" ]] && ! grep -q "path = ~/.gitconfig.devmode" "$HOME/.gitconfig"; then
+      if [[ "$DRY_RUN" -eq 0 ]]; then
+        printf "\n[include]\n\tpath = ~/.gitconfig.devmode\n" >> "$HOME/.gitconfig"
+        log_success "Added devmode gitconfig include to ~/.gitconfig"
+      fi
+    elif [[ ! -f "$HOME/.gitconfig" ]]; then
+      if [[ "$DRY_RUN" -eq 0 ]]; then
+        printf "[include]\n\tpath = ~/.gitconfig.devmode\n" > "$HOME/.gitconfig"
+        log_success "Created ~/.gitconfig with devmode include"
+      fi
+    fi
+  fi
+
+  # Sync global gitignore
+  sync_config_file "${CONFIG_DIR}/gitignore_global" "$HOME/.gitignore_global"
+  if command -v git >/dev/null 2>&1 && [[ "$DRY_RUN" -eq 0 ]]; then
+    git config --global core.excludesfile "$HOME/.gitignore_global"
+  fi
+
+  # Sync commit template
+  sync_config_file "${CONFIG_DIR}/commit_template" "$HOME/.gitmessage"
+  if command -v git >/dev/null 2>&1 && [[ "$DRY_RUN" -eq 0 ]]; then
+    git config --global commit.template "$HOME/.gitmessage"
+  fi
+}
+
+configure_wsl_tweaks() {
+  if [[ "$IS_WSL" -ne 1 ]]; then
+    return
+  fi
+
+  log_step "Applying WSL-specific optimizations"
+
+  # Add WSL-specific aliases and settings
+  local wsl_snippet
+  wsl_snippet=$(cat <<'WSL'
+# WSL-specific settings
+export DISPLAY=$(cat /etc/resolv.conf | grep nameserver | awk '{print $2}'):0
+export LIBGL_ALWAYS_INDIRECT=1
+
+# Windows interop helpers
+alias explorer='explorer.exe'
+alias code='code.exe'
+alias open='explorer.exe'
+
+# Fix permissions for Windows files
+if command -v umask >/dev/null 2>&1; then
+  umask 022
+fi
+WSL
+)
+
+  ensure_shell_snippet "$HOME/.bashrc" "wsl-tweaks" "$wsl_snippet"
+  ensure_shell_snippet "$HOME/.zshrc" "wsl-tweaks" "$wsl_snippet"
+
+  log_success "WSL optimizations applied"
+}
+
 configure_shells() {
   local bash_rc="$HOME/.bashrc"
   local zsh_rc="$HOME/.zshrc"
@@ -426,6 +686,11 @@ alias ll='eza -l --git'
 alias cat='bat'
 alias grep='rg'
 alias find='fd'
+alias vim='nvim'
+alias v='nvim'
+if [ -f "$HOME/.config/dev-bootstrap/shell_functions.sh" ]; then
+  source "$HOME/.config/dev-bootstrap/shell_functions.sh"
+fi
 if command -v fzf >/dev/null 2>&1; then
   eval "$(fzf --bash || true)"
 fi
@@ -462,6 +727,11 @@ alias ll='eza -l --git'
 alias cat='bat'
 alias grep='rg'
 alias find='fd'
+alias vim='nvim'
+alias v='nvim'
+if [[ -f "$HOME/.config/dev-bootstrap/shell_functions.sh" ]]; then
+  source "$HOME/.config/dev-bootstrap/shell_functions.sh"
+fi
 if command -v fzf >/dev/null 2>&1; then
   eval "$(fzf --zsh || true)"
 fi
@@ -502,6 +772,12 @@ print_versions() {
     asdf
     lazygit
     delta
+    jq
+    yq
+    http
+    nvim
+    kubectl
+    k9s
   )
   log_step "Verifying tool versions"
   for tool in "${tools[@]}"; do
@@ -558,9 +834,17 @@ ensure_fd_symlink
 ensure_bat_symlink
 ensure_starship_binary
 ensure_lazygit_binary
+ensure_yq_binary
+ensure_kubectl_binary
+ensure_k9s_binary
 ensure_asdf
+ensure_asdf_plugins
 ensure_asdf_templates
+configure_neovim
+configure_git
+configure_wsl_tweaks
 configure_shells
+sync_config_file "${CONFIG_DIR}/shell_functions.sh" "$HOME/.config/dev-bootstrap/shell_functions.sh"
 sync_config_file "${CONFIG_DIR}/inputrc" "$HOME/.inputrc"
 sync_config_file "${CONFIG_DIR}/tmux.conf" "$HOME/.tmux.conf"
 sync_config_file "${CONFIG_DIR}/starship.toml" "$HOME/.config/starship.toml"
